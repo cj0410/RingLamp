@@ -2,29 +2,24 @@
 
 A Particle project named LedRingLamp
 
-## Welcome to your project!
+## Features
+This lamp has the following features:
 
-Every new Particle project is composed of 3 important elements that you'll see have been created in your project directory for LedRingLamp.
+## Hardware
+It was built with the following hardware:
+- [Particle Photon](https://core-electronics.com.au/particle-photon-no-headers.html)
+- [DC-DC Power Module 25W](https://core-electronics.com.au/dc-dc-power-module-25w.html)
+- [Logic Level Converter Bi-Directional](https://core-electronics.com.au/logic-level-converter-bi-directional.html)
+- [5M RGB Led Strip](https://core-electronics.com.au/5m-rgb-led-strip-ws2812-60-per-meter-black-strip-weatherproof.html)
+- [Panel Mount 2.1mm DC Barrel Jack](https://core-electronics.com.au/panel-mount-2-1mm-dc-barrel-jack.html)
+- [Screw Terminal Block: 3-Pin, 5 mm Pitch, Side Entry](https://core-electronics.com.au/screw-terminal-block-3-pin-5-mm-pitch-side-entry-4-pack.html)
+- [Screw Terminal Block: 2-Pin, 5 mm Pitch, Side Entry](https://core-electronics.com.au/screw-terminal-block-2-pin-5-mm-pitch-side-entry-4-pack.html)
 
-#### ```/src``` folder:  
-This is the source folder that contains the firmware files for your project. It should *not* be renamed. 
-Anything that is in this folder when you compile your project will be sent to our compile service and compiled into a firmware binary for the Particle device that you have targeted.
+**NOTE** 
 
-If your application contains multiple files, they should all be included in the `src` folder. If your firmware depends on Particle libraries, those dependencies are specified in the `project.properties` file referenced below.
-
-#### ```.ino``` file:
-This file is the firmware that will run as the primary application on your Particle device. It contains a `setup()` and `loop()` function, and can be written in Wiring or C/C++. For more information about using the Particle firmware API to create firmware for your Particle device, refer to the [Firmware Reference](https://docs.particle.io/reference/firmware/) section of the Particle documentation.
-
-#### ```project.properties``` file:  
-This is the file that specifies the name and version number of the libraries that your project depends on. Dependencies are added automatically to your `project.properties` file when you add a library to a project using the `particle library add` command in the CLI or add a library in the Desktop IDE.
-
-## Adding additional files to your project
-
-#### Projects with multiple sources
-If you would like add additional files to your application, they should be added to the `/src` folder. All files in the `/src` folder will be sent to the Particle Cloud to produce a compiled binary.
-
-#### Projects with external libraries
-If your project includes a library that has not been registered in the Particle libraries system, you should create a new folder named `/lib/<libraryname>/src` under `/<project dir>` and add the `.h`, `.cpp` & `library.properties` files for your library there. Read the [Firmware Libraries guide](https://docs.particle.io/guide/tools-and-features/libraries/) for more details on how to develop libraries. Note that all contents of the `/lib` folder and subfolders will also be sent to the Cloud for compilation.
+## Video
+You can watch a demonstation of the system features here:
+[LED Ring Lamp]())
 
 ## Compiling your project
 
