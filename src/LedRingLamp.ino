@@ -34,15 +34,16 @@ SYSTEM_MODE(AUTOMATIC);
 volatile uint32_t rgbColour;
 volatile uint8_t buttonMode;
 
-volatile uint16_t hue;
+volatile int16_t hueControl;
 uint8_t hueInc;
 
-volatile uint8_t sat;
+volatile int8_t satControl;
 uint8_t satInc;
 
-volatile uint8_t lum;
+volatile int8_t lumControl;
 uint8_t lumInc;
 
+volatile int16_t brightnessControl;
 volatile uint8_t brightness;
 volatile uint8_t lastBrightness;
 uint8_t brightnessInc;
@@ -122,17 +123,18 @@ void setup() {
 
   // CJ: Initialise brightness
   brightnessInc = 5;
-  brightness = 2;
+  brightnessControl = 20;
+  brightness =  (uint8_t) brightnessControl;
   lastBrightness = brightness;
 
   // CJ: Initialise colour increment
-  hue = hsl.h;
+  hueControl = hsl.h;
   hueInc = 5;
 
-  sat = hsl.s;
+  satControl = hsl.s;
   satInc = 5;
 
-  lum = hsl.l;
+  lumControl = hsl.l;
   lumInc = 5;
 
   buttonMode = 1; // set hue
@@ -200,16 +202,13 @@ void incrementBrightness() {
 
   if(e1aState != e1aLastState && !lightOff) { 
     if(digitalRead(ENCODER_1B) == e1aState) {
-      if(brightness < 255) {
-        brightness += brightnessInc;
-      }
+      brightnessControl += brightnessInc;
     } else {
-      if(brightness > 0) {
-        brightness -= brightnessInc;
-      }
+      brightnessControl -= brightnessInc;
     }
-    brightness = min((uint8_t) 255, brightness);
-    brightness = max((uint8_t) 0, brightness);
+
+    brightnessControl = max(0, min(255, brightnessControl));
+    brightness = (uint8_t) brightnessControl; 
   }
 
   e1aLastState = e1aState;
@@ -240,21 +239,22 @@ void incrementHue() {
 
   if(e2aState != e2aLastState && !lightOff) { 
     if(digitalRead(ENCODER_2B) == e2aState) {
-      hue += hueInc;
-      if(hue > 359) {
-        hue = 0;
+      hueControl += hueInc;
+      if(hueControl > 359) {
+        hueControl = 0;
       }
     } else {
-      hue -= hueInc;
-      if(hue < 0) {
-        hue = 359;
+      hueControl -= hueInc;
+      if(hueControl < 0) {
+        hueControl = 359;
       }
     }
+
+  hueControl = max(0, min(359, hueControl));
+  hsl.h = (uint16_t) hueControl;
   }
 
   e2aLastState = e2aState;
-
-  hsl.h = hue;
 }
 
 void incrementSat() {
@@ -262,22 +262,16 @@ void incrementSat() {
 
   if(e2aState != e2aLastState && !lightOff) { 
     if(digitalRead(ENCODER_2B) == e2aState) {
-      if(sat < 100) {
-        sat += satInc;
-      }
+        satControl += satInc;
     } else {
-      if(sat > 0) {
-        sat -= satInc;
-      }
+        satControl -= satInc;
     }
+
+    satControl = max(0, min(100, satControl));
+    hsl.s = (uint8_t) satControl;
   }
 
   e2aLastState = e2aState;
-
-  sat = min((uint8_t) 100, sat);
-  sat = max((uint8_t) 0, sat);
-
-  hsl.s = sat;
 }
 
 void incrementLum() {
@@ -285,22 +279,16 @@ void incrementLum() {
 
   if(e2aState != e2aLastState && !lightOff) { 
     if(digitalRead(ENCODER_2B) == e2aState) {
-      if(lum < 100) {
-        lum += satInc;
-      }
+        lumControl += satInc;
     } else {
-      if(lum > 0) {
-        lum -= satInc;
-      }
+        lumControl -= satInc;
     }
+
+    lumControl = max(0, min(100, lumControl));
+    hsl.l = (uint8_t) lumControl;
   }
 
   e2aLastState = e2aState;
-
-  lum = min((uint8_t) 100, lum);
-  lum = max((uint8_t) 0, lum);
-
-  hsl.l = lum;
 }
 
 // CJ: Particle Functions
