@@ -7,6 +7,30 @@
 
 #include "Particle.h"
 #include "neopixel.h"
+#include "Adafruit_MQTT/Adafruit_MQTT.h" 
+#include "Adafruit_MQTT/Adafruit_MQTT_SPARK.h" 
+#include "Adafruit_MQTT/Adafruit_MQTT.h" 
+
+// CJ: === Adafruit.io Setup ===
+#define AIO_SERVER      "io.adafruit.com" 
+#define AIO_SERVERPORT  1883                   // use 8883 for SSL 
+#define AIO_USERNAME    "cj0410" 
+#define AIO_KEY         "4c896e648ca84193aaecad4f38b29fe4" 
+
+// CJ: === Global State (you don't need to change this!) ===
+TCPClient TheClient; 
+// Setup the MQTT client class by passing in the WiFi client and MQTT server and login details. 
+Adafruit_MQTT_SPARK mqtt(&TheClient, AIO_SERVER, AIO_SERVERPORT, AIO_USERNAME, AIO_KEY);
+
+// CJ: === Feeds ===
+// Notice MQTT paths for AIO follow the form: <username>/feeds/<feedname> 
+Adafruit_MQTT_Publish hue = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/hue"); 
+Adafruit_MQTT_Publish sat = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/sat"); 
+Adafruit_MQTT_Publish lum = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/lum"); 
+Adafruit_MQTT_Publish bright = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/bright"); 
+Adafruit_MQTT_Publish onoff = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/onoff");
+
+Adafruit_MQTT_Subscribe rgbSub = Adafruit_MQTT_Subscribe(&mqtt, AIO_USERNAME "/feeds/rgb");
 
 SYSTEM_MODE(AUTOMATIC);
 
@@ -23,11 +47,11 @@ SYSTEM_MODE(AUTOMATIC);
 
 // CJ: LED
 #define PIXEL_PIN D3
-#define PIXEL_COUNT 24
+#define PIXEL_COUNT 68*2 - 1
 
-#define DEFAULT_H 45
+#define DEFAULT_H 20
 #define DEFAULT_S 100
-#define DEFAULT_L 50
+#define DEFAULT_L 75
 
 // === VARIABLES ===
 // CJ: LED CONTROL
@@ -63,31 +87,41 @@ system_tick_t pb1LastDebounceTime;
 uint8_t pb2DebounceTimeout;
 system_tick_t pb2LastDebounceTime;
 
+// CJ: MQTT Ping and connection checks
+uint8_t publishMode;
+
+uint32_t checkMQTTConnectionTimeout;
+system_tick_t lastCheckMQTTConnectionTime;
+
+uint32_t publishMQTTTimeout;
+system_tick_t lastPublishMQTTTime;
+
 struct hsl {
   uint16_t h;
   uint8_t s;
   uint8_t l;
-} hsl;
+} hslVal;
 
 Adafruit_NeoPixel strip(PIXEL_COUNT, PIXEL_PIN, 0x02);
 
 // Prototypes for local build, ok to leave in for Build IDE
 int setColour(String input);
-int setBrightness(String input);
+int setBri(String input);
 int setHue(String input);
-int setSaturation(String input);
-int setLuminance(String input);
+int setSat(String input);
+int setLum(String input);
 
 // CJ: Interrupt functions
 void toggleLight();
 void toggleMode();
-void incrementBrightness();
+void incrementBri();
 void incrementHue();
 void incrementSat();
 void incrementLum();
 
 uint32_t Wheel(byte WheelPos);
 uint32_t hsl2rgb(uint16_t ih, uint8_t is, uint8_t il);
+hsl rgb2hsl(uint8_t ir, uint8_t ig, uint8_t ib);
 uint8_t hsl_convert(float c, float t1, float t2);
 
 // setup() runs once, when the device is first turned on.
@@ -106,7 +140,7 @@ void setup() {
 
   pinMode(ENCODER_1A, INPUT_PULLUP);
   pinMode(ENCODER_1B, INPUT_PULLUP);
-  attachInterrupt(ENCODER_1A, incrementBrightness, CHANGE);
+  attachInterrupt(ENCODER_1A, incrementBri, CHANGE);
 
   pinMode(ENCODER_2A, INPUT_PULLUP);
   pinMode(ENCODER_2B, INPUT_PULLUP);
@@ -116,10 +150,10 @@ void setup() {
   lightOff = false;
 
   // CJ: Initialise the colour and brightness
-  hsl.h = DEFAULT_H;
-  hsl.s = DEFAULT_S;
-  hsl.l = DEFAULT_L;
-  rgbColour = hsl2rgb(hsl.h, hsl.s, hsl.l);
+  hslVal.h = DEFAULT_H;
+  hslVal.s = DEFAULT_S;
+  hslVal.l = DEFAULT_L;
+  rgbColour = hsl2rgb(hslVal.h, hslVal.s, hslVal.l);
 
   // CJ: Initialise brightness
   brightnessInc = 5;
@@ -128,16 +162,17 @@ void setup() {
   lastBrightness = brightness;
 
   // CJ: Initialise colour increment
-  hueControl = hsl.h;
+  hueControl = hslVal.h;
   hueInc = 5;
 
-  satControl = hsl.s;
+  satControl = hslVal.s;
   satInc = 5;
 
-  lumControl = hsl.l;
+  lumControl = hslVal.l;
   lumInc = 5;
 
   buttonMode = 1; // set hue
+  publishMode = 1;
 
   // CJ: Init debounce timeout
   pb1DebounceTimeout = 250; //ms
@@ -146,28 +181,78 @@ void setup() {
   pb2DebounceTimeout = 250; //ms
   pb2LastDebounceTime = millis();
 
+  // CJ: Init MQTT connection check
+  checkMQTTConnectionTimeout = MQTT_CONN_KEEPALIVE*1000/2;
+  lastCheckMQTTConnectionTime = millis();
+
+  publishMQTTTimeout = 5000;
+  lastPublishMQTTTime = millis();
+
   // CJ: Declare particle functions
   Particle.function("setColour", setColour);
-  Particle.function("setBrightness", setBrightness);
+  Particle.function("setBri", setBri);
   Particle.function("setHue", setHue);
-  Particle.function("setSaturation", setSaturation);
-  Particle.function("setLuminance", setLuminance);
+  Particle.function("setSat", setSat);
+  Particle.function("setLum", setLum);
   Particle.function("setButtonMode", setButtonMode);
+
+  // CJ: Connect to MQTT
+  mqtt.subscribe(&rgbSub); 
+  mqtt.connect();
 }
 
 // loop() runs over and over again, as quickly as it can execute.
 void loop() {
   int i;
-
   noInterrupts();
+  system_tick_t currentTime = millis();
+  if(currentTime - lastCheckMQTTConnectionTime > checkMQTTConnectionTimeout) {
+    // Ensure the connection to the MQTT server is alive (this will make the first
+    // connection and automatically reconnect when disconnected).  See the MQTT_connect
+    // function definition further below.
+    MQTT_connect();
+    lastCheckMQTTConnectionTime = currentTime;
+  }
+
+  if(currentTime - lastPublishMQTTTime > publishMQTTTimeout) {
+    switch(publishMode) { 
+      case 1: 
+        hue.publish(hueControl);
+        publishMode++;
+        break; 
+      case 2: 
+        sat.publish(satControl);
+        publishMode++;
+        break; 
+      case 3: 
+        lum.publish(lumControl);
+        publishMode++;
+        break; 
+      case 4:
+        bright.publish(brightnessControl);
+        publishMode = 1;
+        break;
+      default:
+        break;
+    }
+
+    if(lightOff) {
+      onoff.publish("OFF");
+    } else {
+      onoff.publish("ON");
+    }
+
+    lastPublishMQTTTime = currentTime;
+  }
+
   for(i=0; i<strip.numPixels(); i++) {
     strip.setPixelColor(i, rgbColour);
   }
-  strip.setBrightness(brightness);
-  interrupts();
+  strip.setBri(brightness);
   strip.show();
 
-  delay(50);
+  interrupts();
+  delay(100);
 }
 
 void toggleLight() {
@@ -197,7 +282,7 @@ void toggleMode() {
   pb2LastDebounceTime = currentTime;
 }
 
-void incrementBrightness() {
+void incrementBri() {
   e1aState = digitalRead(ENCODER_1A);
 
   if(e1aState != e1aLastState && !lightOff) { 
@@ -230,7 +315,7 @@ void incrementColour() {
         break;
   }
 
-  rgbColour = hsl2rgb(hsl.h, hsl.s, hsl.l);
+  rgbColour = hsl2rgb(hslVal.h, hslVal.s, hslVal.l);
   interrupts();
 }
 
@@ -251,7 +336,7 @@ void incrementHue() {
     }
 
   hueControl = max(0, min(359, hueControl));
-  hsl.h = (uint16_t) hueControl;
+  hslVal.h = (uint16_t) hueControl;
   }
 
   e2aLastState = e2aState;
@@ -268,7 +353,7 @@ void incrementSat() {
     }
 
     satControl = max(0, min(100, satControl));
-    hsl.s = (uint8_t) satControl;
+    hslVal.s = (uint8_t) satControl;
   }
 
   e2aLastState = e2aState;
@@ -285,7 +370,7 @@ void incrementLum() {
     }
 
     lumControl = max(0, min(100, lumControl));
-    hsl.l = (uint8_t) lumControl;
+    hslVal.l = (uint8_t) lumControl;
   }
 
   e2aLastState = e2aState;
@@ -293,24 +378,24 @@ void incrementLum() {
 
 // CJ: Particle Functions
 int setHue(String input) {
-  hsl.h = max(min(input.toInt(), 100), 0)*359/100;
+  hslVal.h = max(min(input.toInt(), 100), 0)*359/100;
 
-  rgbColour = hsl2rgb(hsl.h, hsl.s, hsl.l);
-  return hsl.h;
+  rgbColour = hsl2rgb(hslVal.h, hslVal.s, hslVal.l);
+  return hslVal.h;
 }
 
-int setSaturation(String input) {
-  hsl.s = max(min(input.toInt(), 100), 0);
+int setSat(String input) {
+  hslVal.s = max(min(input.toInt(), 100), 0);
 
-  rgbColour = hsl2rgb(hsl.h, hsl.s, hsl.l);
-  return hsl.s;
+  rgbColour = hsl2rgb(hslVal.h, hslVal.s, hslVal.l);
+  return hslVal.s;
 }
 
-int setLuminance(String input) {
-  hsl.l = max(min(input.toInt(), 100), 0);
+int setLum(String input) {
+  hslVal.l = max(min(input.toInt(), 100), 0);
 
-  rgbColour = hsl2rgb(hsl.h, hsl.s, hsl.l);
-  return hsl.l;
+  rgbColour = hsl2rgb(hslVal.h, hslVal.s, hslVal.l);
+  return hslVal.l;
 }
 
 int setButtonMode(String input) {
@@ -327,7 +412,7 @@ int setColour(String input) {
   return wheelPos;
 }
 
-int setBrightness(String input) {
+int setBri(String input) {
   
   noInterrupts();
   uint8_t val = max(min(input.toInt(), 100), 0);
@@ -391,6 +476,61 @@ uint32_t hsl2rgb(uint16_t ih, uint8_t is, uint8_t il) {
 }
 
 /**
+ * Map RGB color space to HSL
+ * 
+ * Totally borrowed from:
+ * https://www.programmingalgorithms.com/algorithm/rgb-to-hsl?lang=C%2B%2B
+ * 
+ */
+hsl rgb2hsl(uint8_t ir, uint8_t ig, uint8_t ib) {
+  hsl tempHsl;
+
+	float r = (ir / 255.0f);
+	float g = (ig / 255.0f);
+	float b = (ib / 255.0f);
+
+	float vmin = min(min(r, g), b);
+	float vmax = max(max(r, g), b);
+	float delta = vmax - vmin;
+
+	tempHsl.l = (int) ((vmax + vmin)/2)*100;
+
+	if (delta == 0.0f)
+	{
+		tempHsl.h = 0;
+		tempHsl.s = 0;
+	}
+	else
+	{
+		tempHsl.s = (int) (tempHsl.l <= 50) ? (delta / (vmax + vmin))*100 : (delta / (2 - vmax - vmin))*100;
+
+		float hue;
+
+		if (r == vmax)
+		{
+			hue = ((g - b) / 6) / delta;
+		}
+		else if (g == vmax)
+		{
+			hue = (1.0f / 3) + ((b - r) / 6) / delta;
+		}
+		else
+		{
+			hue = (2.0f / 3) + ((r - g) / 6) / delta;
+		}
+
+		if (hue < 0)
+			hue += 1;
+		if (hue > 1)
+			hue -= 1;
+
+		tempHsl.h = (int)(hue*360);
+	}
+
+  return tempHsl;
+}
+
+/**
  * HSL Convert
  * Helper function
  */
@@ -405,4 +545,30 @@ uint8_t hsl_convert(float c, float t1, float t2) {
   else c = t2;
   
   return (uint8_t)(c*255); 
+}
+
+// Function to connect and reconnect as necessary to the MQTT server.
+// Should be called in the loop function and it will take care if connecting.
+void MQTT_connect() {
+  int8_t ret;
+ 
+  // Stop if already connected.
+  if (mqtt.connected()) {
+    // CJ: Service the MQTT broker
+    if(!mqtt.ping()) {
+      mqtt.disconnect();
+    }
+
+    return;
+  }
+ 
+  //Serial.print("Connecting to MQTT... ");
+ 
+  while ((ret = mqtt.connect()) != 0) { // connect will return 0 for connected
+       //Serial.println(mqtt.connectErrorString(ret));
+       //Serial.println("Retrying MQTT connection in 5 seconds...");
+       mqtt.disconnect();
+       delay(5000);  // wait 5 seconds
+  }
+  //Serial.println("MQTT Connected!");
 }
