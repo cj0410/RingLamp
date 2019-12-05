@@ -7,30 +7,9 @@
 
 #include "Particle.h"
 #include "neopixel.h"
-#include "Adafruit_MQTT/Adafruit_MQTT.h" 
-#include "Adafruit_MQTT/Adafruit_MQTT_SPARK.h" 
-#include "Adafruit_MQTT/Adafruit_MQTT.h" 
-
-// CJ: === Adafruit.io Setup ===
-#define AIO_SERVER      "io.adafruit.com" 
-#define AIO_SERVERPORT  1883                   // use 8883 for SSL 
-#define AIO_USERNAME    "cj0410" 
-#define AIO_KEY         "4c896e648ca84193aaecad4f38b29fe4" 
 
 // CJ: === Global State (you don't need to change this!) ===
 TCPClient TheClient; 
-// Setup the MQTT client class by passing in the WiFi client and MQTT server and login details. 
-Adafruit_MQTT_SPARK mqtt(&TheClient, AIO_SERVER, AIO_SERVERPORT, AIO_USERNAME, AIO_KEY);
-
-// CJ: === Feeds ===
-// Notice MQTT paths for AIO follow the form: <username>/feeds/<feedname> 
-Adafruit_MQTT_Publish hue = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/hue"); 
-Adafruit_MQTT_Publish sat = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/sat"); 
-Adafruit_MQTT_Publish lum = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/lum"); 
-Adafruit_MQTT_Publish bright = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/bright"); 
-Adafruit_MQTT_Publish onoff = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/onoff");
-
-Adafruit_MQTT_Subscribe rgbSub = Adafruit_MQTT_Subscribe(&mqtt, AIO_USERNAME "/feeds/rgb");
 
 SYSTEM_MODE(AUTOMATIC);
 
@@ -50,8 +29,8 @@ SYSTEM_MODE(AUTOMATIC);
 #define PIXEL_COUNT 68*2 - 1
 
 #define DEFAULT_H 20
-#define DEFAULT_S 100
-#define DEFAULT_L 75
+#define DEFAULT_S 75
+#define DEFAULT_L 50
 
 // === VARIABLES ===
 // CJ: LED CONTROL
@@ -59,13 +38,21 @@ volatile uint32_t rgbColour;
 volatile uint8_t buttonMode;
 
 volatile int16_t hueControl;
+volatile int16_t hueSaved;
 uint8_t hueInc;
 
 volatile int8_t satControl;
+volatile int8_t satSaved;
 uint8_t satInc;
 
 volatile int8_t lumControl;
+volatile int8_t lumSaved;
 uint8_t lumInc;
+
+volatile int8_t modeControl;
+uint8_t modeInc;
+bool modeLock;
+bool modeLatch;
 
 volatile int16_t brightnessControl;
 volatile uint8_t brightness;
@@ -86,15 +73,6 @@ system_tick_t pb1LastDebounceTime;
 
 uint8_t pb2DebounceTimeout;
 system_tick_t pb2LastDebounceTime;
-
-// CJ: MQTT Ping and connection checks
-uint8_t publishMode;
-
-uint32_t checkMQTTConnectionTimeout;
-system_tick_t lastCheckMQTTConnectionTime;
-
-uint32_t publishMQTTTimeout;
-system_tick_t lastPublishMQTTTime;
 
 struct hsl {
   uint16_t h;
@@ -118,11 +96,14 @@ void incrementBri();
 void incrementHue();
 void incrementSat();
 void incrementLum();
+void lightMode();
 
 uint32_t Wheel(byte WheelPos);
 uint32_t hsl2rgb(uint16_t ih, uint8_t is, uint8_t il);
 hsl rgb2hsl(uint8_t ir, uint8_t ig, uint8_t ib);
 uint8_t hsl_convert(float c, float t1, float t2);
+
+int randn(int minVal, int maxVal);
 
 // setup() runs once, when the device is first turned on.
 void setup() {
@@ -156,23 +137,30 @@ void setup() {
   rgbColour = hsl2rgb(hslVal.h, hslVal.s, hslVal.l);
 
   // CJ: Initialise brightness
-  brightnessInc = 5;
-  brightnessControl = 20;
+  brightnessInc = 1;
+  brightnessControl = 10;
   brightness =  (uint8_t) brightnessControl;
   lastBrightness = brightness;
 
   // CJ: Initialise colour increment
   hueControl = hslVal.h;
-  hueInc = 5;
+  hueSaved = hslVal.h;
+  hueInc = 2;
 
   satControl = hslVal.s;
-  satInc = 5;
+  satSaved = hslVal.s;
+  satInc = 2;
 
   lumControl = hslVal.l;
-  lumInc = 5;
+  lumSaved = hslVal.l;
+  lumInc = 2;
+
+  modeControl = 0;
+  modeInc = 1;
+  modeLock = false;
+  modeLatch = false;
 
   buttonMode = 1; // set hue
-  publishMode = 1;
 
   // CJ: Init debounce timeout
   pb1DebounceTimeout = 250; //ms
@@ -181,13 +169,6 @@ void setup() {
   pb2DebounceTimeout = 250; //ms
   pb2LastDebounceTime = millis();
 
-  // CJ: Init MQTT connection check
-  checkMQTTConnectionTimeout = MQTT_CONN_KEEPALIVE*1000/2;
-  lastCheckMQTTConnectionTime = millis();
-
-  publishMQTTTimeout = 5000;
-  lastPublishMQTTTime = millis();
-
   // CJ: Declare particle functions
   Particle.function("setColour", setColour);
   Particle.function("setBri", setBri);
@@ -195,63 +176,49 @@ void setup() {
   Particle.function("setSat", setSat);
   Particle.function("setLum", setLum);
   Particle.function("setButtonMode", setButtonMode);
-
-  // CJ: Connect to MQTT
-  mqtt.subscribe(&rgbSub); 
-  mqtt.connect();
 }
 
 // loop() runs over and over again, as quickly as it can execute.
 void loop() {
   int i;
   noInterrupts();
-  system_tick_t currentTime = millis();
-  if(currentTime - lastCheckMQTTConnectionTime > checkMQTTConnectionTimeout) {
-    // Ensure the connection to the MQTT server is alive (this will make the first
-    // connection and automatically reconnect when disconnected).  See the MQTT_connect
-    // function definition further below.
-    MQTT_connect();
-    lastCheckMQTTConnectionTime = currentTime;
+
+  if(modeControl > 0) {
+    modeLock = true;
+  } else {
+    modeLock = false;
   }
 
-  if(currentTime - lastPublishMQTTTime > publishMQTTTimeout) {
-    switch(publishMode) { 
-      case 1: 
-        hue.publish(hueControl);
-        publishMode++;
-        break; 
-      case 2: 
-        sat.publish(satControl);
-        publishMode++;
-        break; 
-      case 3: 
-        lum.publish(lumControl);
-        publishMode++;
-        break; 
-      case 4:
-        bright.publish(brightnessControl);
-        publishMode = 1;
-        break;
-      default:
-        break;
+  if(modeLock) {
+    if(!modeLatch) {
+      hueSaved = hslVal.h;
+      satSaved = hslVal.s;
+      lumSaved = hslVal.l;
+      modeLatch = true;
     }
-
-    if(lightOff) {
-      onoff.publish("OFF");
-    } else {
-      onoff.publish("ON");
+  } else {
+    if(modeLatch) {
+      hslVal.h = hueSaved;
+      hslVal.s = satSaved;
+      hslVal.l = lumSaved;
+      modeLatch = false;
     }
-
-    lastPublishMQTTTime = currentTime;
   }
 
-  for(i=0; i<strip.numPixels(); i++) {
+  for(i = 0; i < strip.numPixels(); i++) {
+    if(modeLock) {
+      hslVal.h = max(0, min(359, hueSaved + randn(-10,10)));
+      hslVal.s = max(0, min(100, satSaved + randn(-10,10)));
+      hslVal.l = max(0, min(50, lumSaved + randn(-40,0)));
+      rgbColour = hsl2rgb(hslVal.h, hslVal.s, hslVal.l);
+    }
+
     strip.setPixelColor(i, rgbColour);
   }
-  strip.setBri(brightness);
+  strip.setBrightness(brightness);
   strip.show();
-
   interrupts();
+
   delay(100);
 }
 
@@ -275,7 +242,7 @@ void toggleMode() {
   if(currentTime - pb2LastDebounceTime > pb2DebounceTimeout) {
     buttonMode++;
 
-    if(buttonMode > 3) {
+    if(buttonMode > 4) {
       buttonMode = 1;
     }
   }
@@ -294,9 +261,10 @@ void incrementBri() {
 
     brightnessControl = max(0, min(255, brightnessControl));
     brightness = (uint8_t) brightnessControl; 
+    e1aLastState = e1aState;
   }
 
-  e1aLastState = e1aState;
+  // e1aLastState = e1aState;
 }
 
 void incrementColour() {
@@ -310,6 +278,9 @@ void incrementColour() {
         break; 
     case 3: 
         incrementLum();
+        break; 
+    case 4: 
+        lightMode();
         break; 
     default:
         break;
@@ -337,9 +308,10 @@ void incrementHue() {
 
   hueControl = max(0, min(359, hueControl));
   hslVal.h = (uint16_t) hueControl;
+  e2aLastState = e2aState;
   }
 
-  e2aLastState = e2aState;
+  // e2aLastState = e2aState;
 }
 
 void incrementSat() {
@@ -354,9 +326,27 @@ void incrementSat() {
 
     satControl = max(0, min(100, satControl));
     hslVal.s = (uint8_t) satControl;
+    e2aLastState = e2aState;
   }
 
-  e2aLastState = e2aState;
+  // e2aLastState = e2aState;
+}
+
+void lightMode() {
+  e2aState = digitalRead(ENCODER_2A);
+
+  if(e2aState != e2aLastState && !lightOff) { 
+    if(digitalRead(ENCODER_2B) == e2aState) {
+        modeControl += modeInc;
+    } else {
+        modeControl -= modeInc;
+    }
+
+    modeControl = max(0, min(1, modeControl));
+    e2aLastState = e2aState;
+  }
+
+  // e2aLastState = e2aState;
 }
 
 void incrementLum() {
@@ -371,9 +361,10 @@ void incrementLum() {
 
     lumControl = max(0, min(100, lumControl));
     hslVal.l = (uint8_t) lumControl;
+    e2aLastState = e2aState;
   }
 
-  e2aLastState = e2aState;
+  // e2aLastState = e2aState;
 }
 
 // CJ: Particle Functions
@@ -547,28 +538,8 @@ uint8_t hsl_convert(float c, float t1, float t2) {
   return (uint8_t)(c*255); 
 }
 
-// Function to connect and reconnect as necessary to the MQTT server.
-// Should be called in the loop function and it will take care if connecting.
-void MQTT_connect() {
-  int8_t ret;
- 
-  // Stop if already connected.
-  if (mqtt.connected()) {
-    // CJ: Service the MQTT broker
-    if(!mqtt.ping()) {
-      mqtt.disconnect();
-    }
-
-    return;
-  }
- 
-  //Serial.print("Connecting to MQTT... ");
- 
-  while ((ret = mqtt.connect()) != 0) { // connect will return 0 for connected
-       //Serial.println(mqtt.connectErrorString(ret));
-       //Serial.println("Retrying MQTT connection in 5 seconds...");
-       mqtt.disconnect();
-       delay(5000);  // wait 5 seconds
-  }
-  //Serial.println("MQTT Connected!");
+int randn(int minVal, int maxVal)
+{
+  // int rand(void); included by default from newlib
+  return rand() % (maxVal-minVal+1) + minVal;
 }
