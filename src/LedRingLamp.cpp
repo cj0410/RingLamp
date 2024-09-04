@@ -36,7 +36,7 @@ SYSTEM_MODE(AUTOMATIC);
 
 // CJ: LED
 #define PIXEL_PIN D3
-#define PIXEL_COUNT 68*2 - 1
+#define PIXEL_COUNT 68*2
 
 #define DEFAULT_H 20
 #define DEFAULT_S 75
@@ -48,16 +48,24 @@ volatile uint32_t rgbColour;
 volatile uint8_t buttonMode;
 
 volatile int16_t hueControl;
+volatile int16_t hueSaved;
 uint8_t hueInc;
 
 volatile int8_t satControl;
+volatile int8_t satSaved;
 uint8_t satInc;
 
 volatile int8_t lumControl;
+volatile int8_t lumSaved;
 uint8_t lumInc;
+
+volatile int8_t disControl;
+uint8_t disInc;
 
 volatile int8_t modeControl;
 uint8_t modeInc;
+bool modeLock;
+bool modeLatch;
 
 volatile int16_t brightnessControl;
 volatile uint8_t brightness;
@@ -93,23 +101,34 @@ int setBri(String input);
 int setHue(String input);
 int setSat(String input);
 int setLum(String input);
+int setDis(String input);
 
 // CJ: Interrupt functions
 void toggleLight();
 void toggleMode();
+
 void incrementBri();
 void incrementHue();
 void incrementSat();
 void incrementLum();
+void incrementDisable();
+
 void lightMode();
+
+void initDisableLEDArray();
 
 uint32_t Wheel(byte WheelPos);
 uint32_t hsl2rgb(uint16_t ih, uint8_t is, uint8_t il);
 hsl rgb2hsl(uint8_t ir, uint8_t ig, uint8_t ib);
 uint8_t hsl_convert(float c, float t1, float t2);
 
-int random(int minVal, int maxVal);
+int randn(int minVal, int maxVal);
 
+int disableArray[PIXEL_COUNT] = {0};
+int disableArrayIdx[PIXEL_COUNT] = {0};
+
+double disArrayMod = 0;
+int disCon = 0;
 // setup() runs once, when the device is first turned on.
 void setup() {
   // Put initialization like pinMode and begin functions here.
@@ -149,16 +168,24 @@ void setup() {
 
   // CJ: Initialise colour increment
   hueControl = hslVal.h;
+  hueSaved = hslVal.h;
   hueInc = 2;
 
   satControl = hslVal.s;
+  satSaved = hslVal.s;
   satInc = 2;
 
   lumControl = hslVal.l;
+  lumSaved = hslVal.l;
   lumInc = 2;
 
   modeControl = 0;
   modeInc = 1;
+  modeLock = false;
+  modeLatch = false;
+
+  disControl = 0;
+  disInc = 1;
 
   buttonMode = 1; // set hue
 
@@ -169,28 +196,43 @@ void setup() {
   pb2DebounceTimeout = 250; //ms
   pb2LastDebounceTime = millis();
 
+  // CJ: Init disable array
+  initDisableLEDArray();
+
   // CJ: Declare particle functions
   Particle.function("setColour", setColour);
   Particle.function("setBri", setBri);
   Particle.function("setHue", setHue);
   Particle.function("setSat", setSat);
   Particle.function("setLum", setLum);
+  Particle.function("setDis", setDis);
   Particle.function("setButtonMode", setButtonMode);
+
+  // CJ: Declare particle variables
+  Particle.variable("disArrayMod", disArrayMod);
+  Particle.variable("disControl", disCon);
 }
 
 // loop() runs over and over again, as quickly as it can execute.
 void loop() {
   int i;
-
   noInterrupts();
-  for(i = 0; i < strip.numPixels(); i++) {
-    if(modeControl > 0) {
 
-      hslVal.h = max(0, min(359, hslVal.h + random(-5,5)));
-      hslVal.s = max(0, min(100, hslVal.s + random(-5,5)));
+  for(i = 0; i < strip.numPixels(); i++) {
+
+    if(buttonMode == 4) {
+      disCon = (int) disControl;
+      disArrayMod = disableArrayIdx[i] % (strip.numPixels()/4 + 1);
+      if(disArrayMod < disControl) {
+        hslVal.l = 0;
+      } else {
+        hslVal.l = DEFAULT_L;
+      }
+
       rgbColour = hsl2rgb(hslVal.h, hslVal.s, hslVal.l);
     }
-    strip.setPixelColor(i, rgbColour);
+
+    strip.setPixelColor(disableArray[i], rgbColour);
   }
   strip.setBrightness(brightness);
   strip.show();
@@ -251,13 +293,13 @@ void incrementColour() {
         incrementHue();
         break; 
     case 2: 
-        incrementSat();
+        incrementDisable();
         break; 
     case 3: 
-        incrementLum();
+        incrementSat();
         break; 
-    case 4: 
-        lightMode();
+    case 4:
+        incrementLum(); 
         break; 
     default:
         break;
@@ -309,6 +351,23 @@ void incrementSat() {
   // e2aLastState = e2aState;
 }
 
+void incrementDisable() {
+  e2aState = digitalRead(ENCODER_2A);
+
+  if(e2aState != e2aLastState && !lightOff) { 
+    if(digitalRead(ENCODER_2B) == e2aState) {
+        disControl += disInc;
+    } else {
+        disControl -= disInc;
+    }
+
+    disControl = max(0, min(34, disControl));
+    e2aLastState = e2aState;
+  }
+
+  // e2aLastState = e2aState;
+}
+
 void lightMode() {
   e2aState = digitalRead(ENCODER_2A);
 
@@ -319,11 +378,25 @@ void lightMode() {
         modeControl -= modeInc;
     }
 
-    modeControl = max(0, min(5, modeControl));
+    modeControl = max(0, min(1, modeControl));
     e2aLastState = e2aState;
   }
 
   // e2aLastState = e2aState;
+}
+
+void initDisableLEDArray() {
+  for(int j = 0; j < strip.numPixels()/4; j++) {
+    disableArray[4*j] = (strip.numPixels()/4) - (j+1);
+    disableArray[4*j + 1] = (strip.numPixels()/4) + (j);
+    disableArray[4*j + 2] = (3*strip.numPixels()/4) + (j);
+    disableArray[4*j + 3] = (3*strip.numPixels()/4) - (j+1);
+
+    disableArrayIdx[4*j] = j;
+    disableArrayIdx[4*j + 1] = j;
+    disableArrayIdx[4*j + 2] = j;
+    disableArrayIdx[4*j + 3] = j;
+  }
 }
 
 void incrementLum() {
@@ -366,8 +439,14 @@ int setLum(String input) {
   return hslVal.l;
 }
 
+int setDis(String input) {
+  disControl = max(min(input.toInt(), 50), 0);
+  
+  return disControl;
+}
+
 int setButtonMode(String input) {
-  buttonMode = max(min(input.toInt(), 3), 1);
+  buttonMode = max(min(input.toInt(), 4), 1);
 
   return buttonMode;
 }
@@ -515,7 +594,7 @@ uint8_t hsl_convert(float c, float t1, float t2) {
   return (uint8_t)(c*255); 
 }
 
-int random(int minVal, int maxVal)
+int randn(int minVal, int maxVal)
 {
   // int rand(void); included by default from newlib
   return rand() % (maxVal-minVal+1) + minVal;

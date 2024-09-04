@@ -7,9 +7,10 @@
 
 #include "Particle.h"
 #include "neopixel.h"
+#include "string.h"
 
 // CJ: === Global State (you don't need to change this!) ===
-TCPClient TheClient; 
+TCPClient TheClient;
 
 SYSTEM_MODE(AUTOMATIC);
 
@@ -26,10 +27,10 @@ SYSTEM_MODE(AUTOMATIC);
 
 // CJ: LED
 #define PIXEL_PIN D3
-#define PIXEL_COUNT 68*2 - 1
+#define PIXEL_COUNT 68 * 2
 
 #define DEFAULT_H 20
-#define DEFAULT_S 75
+#define DEFAULT_S 100
 #define DEFAULT_L 50
 
 // === VARIABLES ===
@@ -38,7 +39,9 @@ volatile uint32_t rgbColour;
 volatile uint8_t buttonMode;
 
 volatile int16_t hueControl;
+volatile int16_t hueBed;
 volatile int16_t hueSaved;
+String hueCurr;
 uint8_t hueInc;
 
 volatile int8_t satControl;
@@ -49,10 +52,11 @@ volatile int8_t lumControl;
 volatile int8_t lumSaved;
 uint8_t lumInc;
 
+volatile int8_t disControl;
+uint8_t disInc;
+
 volatile int8_t modeControl;
 uint8_t modeInc;
-bool modeLock;
-bool modeLatch;
 
 volatile int16_t brightnessControl;
 volatile uint8_t brightness;
@@ -74,7 +78,8 @@ system_tick_t pb1LastDebounceTime;
 uint8_t pb2DebounceTimeout;
 system_tick_t pb2LastDebounceTime;
 
-struct hsl {
+struct hsl
+{
   uint16_t h;
   uint8_t s;
   uint8_t l;
@@ -83,20 +88,21 @@ struct hsl {
 Adafruit_NeoPixel strip(PIXEL_COUNT, PIXEL_PIN, 0x02);
 
 // Prototypes for local build, ok to leave in for Build IDE
-int setColour(String input);
-int setBri(String input);
-int setHue(String input);
-int setSat(String input);
-int setLum(String input);
+int setBedState(String input);
 
 // CJ: Interrupt functions
 void toggleLight();
 void toggleMode();
+
 void incrementBri();
 void incrementHue();
 void incrementSat();
 void incrementLum();
+void incrementDisable();
+
 void lightMode();
+
+void initDisableLEDArray();
 
 uint32_t Wheel(byte WheelPos);
 uint32_t hsl2rgb(uint16_t ih, uint8_t is, uint8_t il);
@@ -105,8 +111,15 @@ uint8_t hsl_convert(float c, float t1, float t2);
 
 int randn(int minVal, int maxVal);
 
+int disableArray[PIXEL_COUNT] = {0};
+int disableArrayIdx[PIXEL_COUNT] = {0};
+
+double disArrayMod = 0;
+int disCon = 0;
+
 // setup() runs once, when the device is first turned on.
-void setup() {
+void setup()
+{
   // Put initialization like pinMode and begin functions here.
   // CJ: Initialise the LED strip.
   strip.begin();
@@ -131,15 +144,17 @@ void setup() {
   lightOff = false;
 
   // CJ: Initialise the colour and brightness
+  hueBed = DEFAULT_H;
+
   hslVal.h = DEFAULT_H;
   hslVal.s = DEFAULT_S;
   hslVal.l = DEFAULT_L;
   rgbColour = hsl2rgb(hslVal.h, hslVal.s, hslVal.l);
 
   // CJ: Initialise brightness
-  brightnessInc = 1;
-  brightnessControl = 10;
-  brightness =  (uint8_t) brightnessControl;
+  brightnessInc = 5;
+  brightnessControl = 80; // 0-255
+  brightness = (uint8_t)brightnessControl;
   lastBrightness = brightness;
 
   // CJ: Initialise colour increment
@@ -157,78 +172,85 @@ void setup() {
 
   modeControl = 0;
   modeInc = 1;
-  modeLock = false;
-  modeLatch = false;
+
+  disControl = 0;
+  disInc = 1;
 
   buttonMode = 1; // set hue
 
   // CJ: Init debounce timeout
-  pb1DebounceTimeout = 250; //ms
+  pb1DebounceTimeout = 250; // ms
   pb1LastDebounceTime = millis();
 
-  pb2DebounceTimeout = 250; //ms
+  pb2DebounceTimeout = 250; // ms
   pb2LastDebounceTime = millis();
 
+  // CJ: Init disable array
+  initDisableLEDArray();
+
   // CJ: Declare particle functions
-  Particle.function("setColour", setColour);
-  Particle.function("setBri", setBri);
-  Particle.function("setHue", setHue);
-  Particle.function("setSat", setSat);
-  Particle.function("setLum", setLum);
-  Particle.function("setButtonMode", setButtonMode);
+  Particle.function("setBedState", setBedState);
+
+  // CJ: Declare particle variables
+  // Particle.variable("disArrayMod", disArrayMod);
+  // Particle.variable("disControl", disCon);
+  Particle.variable("hueCurr", hueCurr);
 }
 
 // loop() runs over and over again, as quickly as it can execute.
-void loop() {
-  int i;
+void loop()
+{
   noInterrupts();
 
-  if(modeControl > 0) {
-    modeLock = true;
-  } else {
-    modeLock = false;
-  }
-
-  if(modeLock) {
-    if(!modeLatch) {
-      hueSaved = hslVal.h;
-      satSaved = hslVal.s;
-      lumSaved = hslVal.l;
-      modeLatch = true;
-    }
-  } else {
-    if(modeLatch) {
-      hslVal.h = hueSaved;
-      hslVal.s = satSaved;
-      hslVal.l = lumSaved;
-      modeLatch = false;
-    }
-  }
-
-  for(i = 0; i < strip.numPixels(); i++) {
-    if(modeLock) {
-      hslVal.h = max(0, min(359, hueSaved + randn(-10,10)));
-      hslVal.s = max(0, min(100, satSaved + randn(-10,10)));
-      hslVal.l = max(0, min(50, lumSaved + randn(-40,0)));
-      rgbColour = hsl2rgb(hslVal.h, hslVal.s, hslVal.l);
+  for (int i = 0; i < strip.numPixels(); i++)
+  {
+    if (buttonMode == 3)
+    {
+      hslVal.h = hueBed;
     }
 
-    strip.setPixelColor(i, rgbColour);
+    if (buttonMode == 2 || buttonMode == 3)
+    {
+      disCon = (int)disControl;
+      disArrayMod = disableArrayIdx[i] % (strip.numPixels() / 4 + 1);
+
+      if (disArrayMod < disControl)
+      {
+        hslVal.l = 0;
+      }
+      else
+      {
+        hslVal.l = DEFAULT_L;
+      }
+    }
+
+    rgbColour = hsl2rgb(hslVal.h, hslVal.s, hslVal.l);
+
+    strip.setPixelColor(disableArray[i], rgbColour);
   }
+
   strip.setBrightness(brightness);
   strip.show();
+
+  hueCurr = String(hueControl);
+
   interrupts();
 
   delay(100);
 }
 
-void toggleLight() {
+void toggleLight()
+{
   system_tick_t currentTime = millis();
-  if(currentTime - pb1LastDebounceTime > pb1DebounceTimeout) {
-    if(lightOff) {
+  if (currentTime - pb1LastDebounceTime > pb1DebounceTimeout)
+  {
+    if (lightOff)
+    {
       brightness = lastBrightness;
       lightOff = false;
-    } else {
+    }
+    else
+    {
       lastBrightness = brightness;
       brightness = 0;
       lightOff = true;
@@ -237,109 +259,182 @@ void toggleLight() {
   pb1LastDebounceTime = currentTime;
 }
 
-void toggleMode() {
+void toggleMode()
+{
   system_tick_t currentTime = millis();
-  if(currentTime - pb2LastDebounceTime > pb2DebounceTimeout) {
+  if (currentTime - pb2LastDebounceTime > pb2DebounceTimeout)
+  {
     buttonMode++;
 
-    if(buttonMode > 4) {
+    if (buttonMode > 3)
+    {
       buttonMode = 1;
     }
   }
   pb2LastDebounceTime = currentTime;
 }
 
-void incrementBri() {
+void incrementBri()
+{
   e1aState = digitalRead(ENCODER_1A);
 
-  if(e1aState != e1aLastState && !lightOff) { 
-    if(digitalRead(ENCODER_1B) == e1aState) {
+  if (e1aState != e1aLastState && !lightOff)
+  {
+    if (digitalRead(ENCODER_1B) == e1aState)
+    {
       brightnessControl += brightnessInc;
-    } else {
+    }
+    else
+    {
       brightnessControl -= brightnessInc;
     }
 
-    brightnessControl = max(0, min(255, brightnessControl));
-    brightness = (uint8_t) brightnessControl; 
+    brightnessControl = max(10, min(255, brightnessControl));
+    brightness = (uint8_t)brightnessControl;
     e1aLastState = e1aState;
   }
 
   // e1aLastState = e1aState;
 }
 
-void incrementColour() {
+void incrementColour()
+{
   noInterrupts();
-  switch(buttonMode) { 
-    case 1: 
-        incrementHue();
-        break; 
-    case 2: 
-        incrementSat();
-        break; 
-    case 3: 
-        incrementLum();
-        break; 
-    case 4: 
-        lightMode();
-        break; 
-    default:
-        break;
+  switch (buttonMode)
+  {
+  case 1:
+    incrementHue();
+    break;
+  case 2:
+    incrementDisable();
+    break;
+  case 3:
+    incrementDisable();
+    // incrementSat();
+    break;
+  // case 4:
+  //   incrementLum();
+  //   break;
+  default:
+    break;
   }
 
   rgbColour = hsl2rgb(hslVal.h, hslVal.s, hslVal.l);
   interrupts();
 }
 
-void incrementHue() {
+void incrementHue()
+{
   e2aState = digitalRead(ENCODER_2A);
 
-  if(e2aState != e2aLastState && !lightOff) { 
-    if(digitalRead(ENCODER_2B) == e2aState) {
+  if (e2aState != e2aLastState && !lightOff)
+  {
+    if (digitalRead(ENCODER_2B) == e2aState)
+    {
       hueControl += hueInc;
-      if(hueControl > 359) {
+      if (hueControl > 359)
+      {
         hueControl = 0;
       }
-    } else {
+    }
+    else
+    {
       hueControl -= hueInc;
-      if(hueControl < 0) {
+      if (hueControl < 0)
+      {
         hueControl = 359;
       }
     }
 
-  hueControl = max(0, min(359, hueControl));
-  hslVal.h = (uint16_t) hueControl;
-  e2aLastState = e2aState;
-  }
-
-  // e2aLastState = e2aState;
-}
-
-void incrementSat() {
-  e2aState = digitalRead(ENCODER_2A);
-
-  if(e2aState != e2aLastState && !lightOff) { 
-    if(digitalRead(ENCODER_2B) == e2aState) {
-        satControl += satInc;
-    } else {
-        satControl -= satInc;
-    }
-
-    satControl = max(0, min(100, satControl));
-    hslVal.s = (uint8_t) satControl;
+    hueControl = max(0, min(359, hueControl));
+    hslVal.h = (uint16_t)hueControl;
     e2aLastState = e2aState;
   }
 
   // e2aLastState = e2aState;
 }
 
-void lightMode() {
+void incrementSat()
+{
   e2aState = digitalRead(ENCODER_2A);
 
-  if(e2aState != e2aLastState && !lightOff) { 
-    if(digitalRead(ENCODER_2B) == e2aState) {
-        modeControl += modeInc;
-    } else {
-        modeControl -= modeInc;
+  if (e2aState != e2aLastState && !lightOff)
+  {
+    if (digitalRead(ENCODER_2B) == e2aState)
+    {
+      satControl += satInc;
+    }
+    else
+    {
+      satControl -= satInc;
+    }
+
+    satControl = max(0, min(100, satControl));
+    hslVal.s = (uint8_t)satControl;
+    e2aLastState = e2aState;
+  }
+
+  // e2aLastState = e2aState;
+}
+
+void incrementLum()
+{
+  e2aState = digitalRead(ENCODER_2A);
+
+  if (e2aState != e2aLastState && !lightOff)
+  {
+    if (digitalRead(ENCODER_2B) == e2aState)
+    {
+      lumControl += satInc;
+    }
+    else
+    {
+      lumControl -= satInc;
+    }
+
+    lumControl = max(0, min(100, lumControl));
+    hslVal.l = (uint8_t)lumControl;
+    e2aLastState = e2aState;
+  }
+
+  // e2aLastState = e2aState;
+}
+
+void incrementDisable()
+{
+  e2aState = digitalRead(ENCODER_2A);
+
+  if (e2aState != e2aLastState && !lightOff)
+  {
+    if (digitalRead(ENCODER_2B) == e2aState)
+    {
+      disControl += disInc;
+    }
+    else
+    {
+      disControl -= disInc;
+    }
+
+    disControl = max(0, min(34, disControl));
+    e2aLastState = e2aState;
+  }
+
+  // e2aLastState = e2aState;
+}
+
+void lightMode()
+{
+  e2aState = digitalRead(ENCODER_2A);
+
+  if (e2aState != e2aLastState && !lightOff)
+  {
+    if (digitalRead(ENCODER_2B) == e2aState)
+    {
+      modeControl += modeInc;
+    }
+    else
+    {
+      modeControl -= modeInc;
     }
 
     modeControl = max(0, min(1, modeControl));
@@ -349,94 +444,83 @@ void lightMode() {
   // e2aLastState = e2aState;
 }
 
-void incrementLum() {
-  e2aState = digitalRead(ENCODER_2A);
+void initDisableLEDArray()
+{
+  for (int j = 0; j < strip.numPixels() / 4; j++)
+  {
+    int offset = 1;
+    disableArray[4 * j] = (strip.numPixels() / 4) - (j + 1 - offset);
+    disableArray[4 * j + 1] = (strip.numPixels() / 4) + (j + offset);
+    disableArray[4 * j + 2] = (3 * strip.numPixels() / 4) + (j - offset);
+    disableArray[4 * j + 3] = (3 * strip.numPixels() / 4) - (j + 1 + offset);
 
-  if(e2aState != e2aLastState && !lightOff) { 
-    if(digitalRead(ENCODER_2B) == e2aState) {
-        lumControl += satInc;
-    } else {
-        lumControl -= satInc;
-    }
-
-    lumControl = max(0, min(100, lumControl));
-    hslVal.l = (uint8_t) lumControl;
-    e2aLastState = e2aState;
+    disableArrayIdx[4 * j] = j;
+    disableArrayIdx[4 * j + 1] = j;
+    disableArrayIdx[4 * j + 2] = j;
+    disableArrayIdx[4 * j + 3] = j;
   }
-
-  // e2aLastState = e2aState;
 }
 
 // CJ: Particle Functions
-int setHue(String input) {
-  hslVal.h = max(min(input.toInt(), 100), 0)*359/100;
-
-  rgbColour = hsl2rgb(hslVal.h, hslVal.s, hslVal.l);
-  return hslVal.h;
-}
-
-int setSat(String input) {
-  hslVal.s = max(min(input.toInt(), 100), 0);
-
-  rgbColour = hsl2rgb(hslVal.h, hslVal.s, hslVal.l);
-  return hslVal.s;
-}
-
-int setLum(String input) {
-  hslVal.l = max(min(input.toInt(), 100), 0);
-
-  rgbColour = hsl2rgb(hslVal.h, hslVal.s, hslVal.l);
-  return hslVal.l;
-}
-
-int setButtonMode(String input) {
-  buttonMode = max(min(input.toInt(), 3), 1);
-
-  return buttonMode;
-}
-
-int setColour(String input) {
-  uint8_t val = max(min(input.toInt(), 100), 0);
-  byte wheelPos = val*255/100;
-  rgbColour = Wheel(wheelPos);
-
-  return wheelPos;
-}
-
-int setBri(String input) {
-  
+int setBedState(String input)
+{
   noInterrupts();
-  uint8_t val = max(min(input.toInt(), 100), 0);
-  brightness = val*255/100;
+
+  switch (input.toInt())
+  {
+    case 0: // STAY IN ROOM
+    {
+      hueBed = DEFAULT_H;
+      break;
+    }
+    case 1: // CAN COME TO OUR ROOM
+    {
+      hueBed = 270;
+      break;
+    }
+    case 2: // BIG GIRL SLEEP SUCCESS!
+    {
+      hueBed = 350;
+      break;
+    }
+  }
+
   interrupts();
 
-  return brightness;
+  return 0;
 }
 
 // Input a value 0 to 255 to get a color value.
 // The colours are a transition r - g - b - back to r.
-uint32_t Wheel(byte WheelPos) {
-  if(WheelPos < 85) {
-   return strip.Color(WheelPos * 3, 255 - WheelPos * 3, 0);
-  } else if(WheelPos < 170) {
-   WheelPos -= 85;
-   return strip.Color(255 - WheelPos * 3, 0, WheelPos * 3);
-  } else {
-   WheelPos -= 170;
-   return strip.Color(0, WheelPos * 3, 255 - WheelPos * 3);
+uint32_t Wheel(byte WheelPos)
+{
+  if (WheelPos < 85)
+  {
+    return strip.Color(WheelPos * 3, 255 - WheelPos * 3, 0);
+  }
+  else if (WheelPos < 170)
+  {
+    WheelPos -= 85;
+    return strip.Color(255 - WheelPos * 3, 0, WheelPos * 3);
+  }
+  else
+  {
+    WheelPos -= 170;
+    return strip.Color(0, WheelPos * 3, 255 - WheelPos * 3);
   }
 }
 
 /**
  * Map HSL color space to RGB
- * 
+ *
  * Totally borrowed from:
- * http://www.niwa.nu/2013/05/math-behind-colorspace-conversions-rgb-hsl/ 
- * 
- * Probably not the most efficient solution, but 
+ * http://www.niwa.nu/2013/05/math-behind-colorspace-conversions-rgb-hsl/
+ *
+ * Probably not the most efficient solution, but
  * it get's the job done.
  */
-uint32_t hsl2rgb(uint16_t ih, uint8_t is, uint8_t il) {
+uint32_t hsl2rgb(uint16_t ih, uint8_t is, uint8_t il)
+{
 
   float h, s, l, t1, t2, tr, tg, tb;
   uint8_t r, g, b;
@@ -445,78 +529,82 @@ uint32_t hsl2rgb(uint16_t ih, uint8_t is, uint8_t il) {
   s = constrain(is, 0, 100) / 100.0;
   l = constrain(il, 0, 100) / 100.0;
 
-  if ( s == 0 ) { 
+  if (s == 0)
+  {
     r = g = b = 255 * l;
-    return ((uint32_t)r << 16) | ((uint32_t)g <<  8) | b;
-  } 
-  
-  if ( l < 0.5 ) t1 = l * (1.0 + s);
-  else t1 = l + s - l * s;
-  
+    return ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+  }
+
+  if (l < 0.5)
+    t1 = l * (1.0 + s);
+  else
+    t1 = l + s - l * s;
+
   t2 = 2 * l - t1;
-  tr = h + 1/3.0;
+  tr = h + 1 / 3.0;
   tg = h;
-  tb = h - 1/3.0;
+  tb = h - 1 / 3.0;
 
   r = hsl_convert(tr, t1, t2);
   g = hsl_convert(tg, t1, t2);
   b = hsl_convert(tb, t1, t2);
 
   // NeoPixel packed RGB color
-  return ((uint32_t)r << 16) | ((uint32_t)g <<  8) | b;
+  return ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
 }
 
 /**
  * Map RGB color space to HSL
- * 
+ *
  * Totally borrowed from:
  * https://www.programmingalgorithms.com/algorithm/rgb-to-hsl?lang=C%2B%2B
- * 
+ *
  */
-hsl rgb2hsl(uint8_t ir, uint8_t ig, uint8_t ib) {
+hsl rgb2hsl(uint8_t ir, uint8_t ig, uint8_t ib)
+{
   hsl tempHsl;
 
-	float r = (ir / 255.0f);
-	float g = (ig / 255.0f);
-	float b = (ib / 255.0f);
+  float r = (ir / 255.0f);
+  float g = (ig / 255.0f);
+  float b = (ib / 255.0f);
 
-	float vmin = min(min(r, g), b);
-	float vmax = max(max(r, g), b);
-	float delta = vmax - vmin;
+  float vmin = min(min(r, g), b);
+  float vmax = max(max(r, g), b);
+  float delta = vmax - vmin;
 
-	tempHsl.l = (int) ((vmax + vmin)/2)*100;
+  tempHsl.l = (int)((vmax + vmin) / 2) * 100;
 
-	if (delta == 0.0f)
-	{
-		tempHsl.h = 0;
-		tempHsl.s = 0;
-	}
-	else
-	{
-		tempHsl.s = (int) (tempHsl.l <= 50) ? (delta / (vmax + vmin))*100 : (delta / (2 - vmax - vmin))*100;
+  if (delta == 0.0f)
+  {
+    tempHsl.h = 0;
+    tempHsl.s = 0;
+  }
+  else
+  {
+    tempHsl.s = (int)(tempHsl.l <= 50) ? (delta / (vmax + vmin)) * 100 : (delta / (2 - vmax - vmin)) * 100;
 
-		float hue;
+    float hue;
 
-		if (r == vmax)
-		{
-			hue = ((g - b) / 6) / delta;
-		}
-		else if (g == vmax)
-		{
-			hue = (1.0f / 3) + ((b - r) / 6) / delta;
-		}
-		else
-		{
-			hue = (2.0f / 3) + ((r - g) / 6) / delta;
-		}
+    if (r == vmax)
+    {
+      hue = ((g - b) / 6) / delta;
+    }
+    else if (g == vmax)
+    {
+      hue = (1.0f / 3) + ((b - r) / 6) / delta;
+    }
+    else
+    {
+      hue = (2.0f / 3) + ((r - g) / 6) / delta;
+    }
 
-		if (hue < 0)
-			hue += 1;
-		if (hue > 1)
-			hue -= 1;
+    if (hue < 0)
+      hue += 1;
+    if (hue > 1)
+      hue -= 1;
 
-		tempHsl.h = (int)(hue*360);
-	}
+    tempHsl.h = (int)(hue * 360);
+  }
 
   return tempHsl;
 }
@@ -525,21 +613,28 @@ hsl rgb2hsl(uint8_t ir, uint8_t ig, uint8_t ib) {
  * HSL Convert
  * Helper function
  */
-uint8_t hsl_convert(float c, float t1, float t2) {
+uint8_t hsl_convert(float c, float t1, float t2)
+{
 
-  if ( c < 0 ) c+=1; 
-  else if ( c > 1 ) c-=1;
+  if (c < 0)
+    c += 1;
+  else if (c > 1)
+    c -= 1;
 
-  if ( 6 * c < 1 ) c = t2 + ( t1 - t2 ) * 6 * c;
-  else if ( 2 * c < 1 ) c = t1;
-  else if ( 3 * c < 2 ) c = t2 + ( t1 - t2 ) * ( 2/3.0 - c ) * 6;
-  else c = t2;
-  
-  return (uint8_t)(c*255); 
+  if (6 * c < 1)
+    c = t2 + (t1 - t2) * 6 * c;
+  else if (2 * c < 1)
+    c = t1;
+  else if (3 * c < 2)
+    c = t2 + (t1 - t2) * (2 / 3.0 - c) * 6;
+  else
+    c = t2;
+
+  return (uint8_t)(c * 255);
 }
 
 int randn(int minVal, int maxVal)
 {
   // int rand(void); included by default from newlib
-  return rand() % (maxVal-minVal+1) + minVal;
+  return rand() % (maxVal - minVal + 1) + minVal;
 }
